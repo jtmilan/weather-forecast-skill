@@ -1,16 +1,10 @@
-#!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
 #     "requests",
 # ]
 # ///
-"""
-Weather Forecast Skill - Retrieve 7-day forecast from NWS API.
-
-This PEP 723 script fetches weather forecasts for Marysville, WA using
-the National Weather Service api.weather.gov API.
-"""
+"""Weather forecast skill for Marysville, WA."""
 
 import argparse
 import json
@@ -23,13 +17,13 @@ import requests
 
 
 # Constants
-LAT: float = 48.0518
-LON: float = -122.1771
-USER_AGENT: str = "weather-forecast-skill/0.1 (jtmilan@gmail.com)"
-POINTS_URL_TEMPLATE: str = "https://api.weather.gov/points/{lat},{lon}"
-REQUEST_TIMEOUT: int = 10  # seconds
-RETRY_DELAY: float = 2.0  # seconds
-MAX_DAYS: int = 7
+LAT = 48.0518
+LON = -122.1771
+USER_AGENT = "weather-forecast-skill/0.1 (jtmilan@gmail.com)"
+POINTS_URL_TEMPLATE = "https://api.weather.gov/points/{lat},{lon}"
+REQUEST_TIMEOUT = 10
+RETRY_DELAY = 2.0
+MAX_DAYS = 7
 
 
 @dataclass
@@ -45,7 +39,7 @@ class DailyForecast:
 
 def make_request(url: str, session: requests.Session) -> requests.Response:
     """
-    Make HTTP GET request with retry logic.
+    Make HTTP GET request with retry logic for 5xx errors.
 
     Args:
         url: Full URL to fetch
@@ -55,41 +49,35 @@ def make_request(url: str, session: requests.Session) -> requests.Response:
         requests.Response object on success
 
     Raises:
-        SystemExit: On 4xx error (exits with code 1, prints to stderr)
-        SystemExit: On connection error (exits with code 1, prints to stderr)
-        SystemExit: On 5xx after retry fails (exits with code 1, prints to stderr)
+        SystemExit: On 4xx error, connection error, or 5xx after retry
     """
     try:
+        # Try first request
         response = session.get(url, timeout=REQUEST_TIMEOUT)
 
-        # Handle 5xx errors with retry
-        if response.status_code >= 500:
+        # Handle 5xx with retry
+        if 500 <= response.status_code < 600:
             time.sleep(RETRY_DELAY)
-            try:
-                response = session.get(url, timeout=REQUEST_TIMEOUT)
-                if response.status_code >= 500:
-                    print(
-                        f"Error: {response.status_code} {response.text[:200]}",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-            except requests.RequestException as e:
-                print(f"Error: {e}", file=sys.stderr)
-                sys.exit(1)
+            response = session.get(url, timeout=REQUEST_TIMEOUT)
 
         # Handle 4xx errors
         if 400 <= response.status_code < 500:
-            print(
-                f"Error: {response.status_code} {response.text[:200]}",
-                file=sys.stderr,
-            )
+            error_msg = f"Error: {response.status_code} {response.text[:200]}"
+            print(error_msg, file=sys.stderr)
+            sys.exit(1)
+
+        # Handle remaining 5xx errors after retry
+        if 500 <= response.status_code < 600:
+            error_msg = f"Error: {response.status_code} {response.text[:200]}"
+            print(error_msg, file=sys.stderr)
             sys.exit(1)
 
         response.raise_for_status()
         return response
 
     except requests.RequestException as e:
-        print(f"Error: {e}", file=sys.stderr)
+        error_msg = f"Error: {e}"
+        print(error_msg, file=sys.stderr)
         sys.exit(1)
 
 
@@ -152,40 +140,37 @@ def aggregate_periods(periods: list[dict], max_days: int) -> list[DailyForecast]
         4. If night period missing (end of data), set low_temp=None
         5. Return first max_days results
     """
-    forecasts: list[DailyForecast] = []
+    forecasts = []
+    i = 0
 
-    # Find first isDaytime=true period
-    start_idx = 0
-    for i, period in enumerate(periods):
-        if period.get("isDaytime"):
-            start_idx = i
-            break
+    # Skip leading night period if present
+    if periods and not periods[0].get("isDaytime", True):
+        i = 1
 
-    # Pair day and night periods
-    i = start_idx
+    # Pair day/night periods
     while i < len(periods) and len(forecasts) < max_days:
         day_period = periods[i]
 
-        # Make sure we have a day period
-        if not day_period.get("isDaytime"):
+        # Ensure this is a daytime period
+        if not day_period.get("isDaytime", True):
             i += 1
             continue
 
-        # Look for corresponding night period
-        night_period = None
+        # Try to get the night period
+        low_temp = None
         if i + 1 < len(periods):
-            next_period = periods[i + 1]
-            if not next_period.get("isDaytime"):
-                night_period = next_period
+            night_period = periods[i + 1]
+            if not night_period.get("isDaytime", True):
+                low_temp = night_period.get("temperature")
 
-        # Extract values
-        day_name = day_period.get("name", "Unknown")
+        # Extract data from day period
+        day_name = day_period.get("name", "Day")
         high_temp = day_period.get("temperature", 0)
-        low_temp = night_period.get("temperature") if night_period else None
         conditions = day_period.get("shortForecast", "Unknown")
-        precip_pct = (
-            day_period.get("probabilityOfPrecipitation", {}).get("value") or 0
-        )
+        precip_data = day_period.get("probabilityOfPrecipitation", {})
+        precip_pct = precip_data.get("value", 0) if precip_data else 0
+        if precip_pct is None:
+            precip_pct = 0
 
         forecasts.append(
             DailyForecast(
@@ -193,12 +178,11 @@ def aggregate_periods(periods: list[dict], max_days: int) -> list[DailyForecast]
                 high_temp=high_temp,
                 low_temp=low_temp,
                 conditions=conditions,
-                precip_pct=precip_pct,
+                precip_pct=int(precip_pct),
             )
         )
 
-        # Move to next day period (skip night if present)
-        i += 2 if night_period else 1
+        i += 2  # Move to next day period
 
     return forecasts
 
@@ -219,32 +203,30 @@ def format_markdown_table(forecasts: list[DailyForecast], units: str) -> str:
     Returns:
         Markdown table string with header and data rows
     """
-    # Format temperature based on units
-    def format_temp(temp: int) -> str:
-        if units == "metric":
-            celsius = fahrenheit_to_celsius(temp)
-            return f"{celsius}°C"
-        else:
-            return f"{temp}°F"
+    # Header
+    lines = [
+        "| Day       | High | Low  | Conditions    | Precip% |",
+        "|-----------|------|------|---------------|---------|",
+    ]
 
-    lines = []
-    lines.append("| Day       | High | Low  | Conditions    | Precip% |")
-    lines.append("|-----------|------|------|---------------|---------|")
-
+    # Data rows
     for forecast in forecasts:
-        high_str = format_temp(forecast.high_temp)
-        low_str = (
-            format_temp(forecast.low_temp)
-            if forecast.low_temp is not None
-            else "N/A"
-        )
-        precip_str = f"{forecast.precip_pct}%"
+        if units == "metric":
+            high_str = f"{fahrenheit_to_celsius(forecast.high_temp)}°C"
+            low_str = (
+                f"{fahrenheit_to_celsius(forecast.low_temp)}°C"
+                if forecast.low_temp is not None
+                else "N/A"
+            )
+        else:  # imperial
+            high_str = f"{forecast.high_temp}°F"
+            low_str = f"{forecast.low_temp}°F" if forecast.low_temp is not None else "N/A"
 
-        # Truncate conditions to fit in column
-        conditions = forecast.conditions[:13].ljust(13)
-        day_name = forecast.day_name[:9].ljust(9)
+        # Pad day name, conditions to consistent width
+        day_padded = forecast.day_name.ljust(9)
+        conditions_padded = forecast.conditions.ljust(13)
 
-        line = f"| {day_name} | {high_str:>4} | {low_str:>4} | {conditions} | {precip_str:>7} |"
+        line = f"| {day_padded} | {high_str:>4} | {low_str:>4} | {conditions_padded} | {forecast.precip_pct:>5}% |"
         lines.append(line)
 
     return "\n".join(lines)
@@ -261,13 +243,16 @@ def format_json(periods: list[dict], max_days: int) -> str:
     Returns:
         JSON string (pretty-printed with indent=2)
     """
-    limited_periods = periods[: max_days * 2]
-    return json.dumps(limited_periods, indent=2)
+    limit = max_days * 2
+    return json.dumps(periods[:limit], indent=2)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(args: Optional[list[str]] = None) -> argparse.Namespace:
     """
     Parse command-line arguments.
+
+    Args:
+        args: Optional list of arguments. If None, uses sys.argv.
 
     Returns:
         Namespace with:
@@ -276,7 +261,7 @@ def parse_args() -> argparse.Namespace:
             - json: bool (default False)
     """
     parser = argparse.ArgumentParser(
-        description="Get a 7-day weather forecast for Marysville, WA"
+        description="Get 7-day weather forecast for Marysville, WA"
     )
     parser.add_argument(
         "--days",
@@ -288,7 +273,7 @@ def parse_args() -> argparse.Namespace:
         "--units",
         choices=["imperial", "metric"],
         default="imperial",
-        help="Temperature units (default: imperial)",
+        help="Temperature units: imperial or metric (default: imperial)",
     )
     parser.add_argument(
         "--json",
@@ -296,18 +281,21 @@ def parse_args() -> argparse.Namespace:
         help="Output raw JSON instead of markdown table",
     )
 
-    args = parser.parse_args()
+    parsed_args = parser.parse_args(args)
 
     # Validate days argument
-    if args.days < 1 or args.days > 7:
+    if not 1 <= parsed_args.days <= 7:
         parser.error("--days must be between 1 and 7")
 
-    return args
+    return parsed_args
 
 
-def main() -> None:
+def main(args: Optional[list[str]] = None) -> None:
     """
     Main entrypoint.
+
+    Args:
+        args: Optional list of CLI arguments. If None, uses sys.argv.
 
     Flow:
         1. Parse CLI args
@@ -321,24 +309,22 @@ def main() -> None:
         0: Success
         1: HTTP error or connection error
     """
-    args = parse_args()
+    parsed_args = parse_args(args)
 
     # Create session with User-Agent header
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
 
-    # Fetch forecast URL
+    # Fetch data
     forecast_url = fetch_forecast_url(session)
-
-    # Fetch periods
     periods = fetch_periods(forecast_url, session)
 
     # Output
-    if args.json:
-        output = format_json(periods, args.days)
+    if parsed_args.json:
+        output = format_json(periods, parsed_args.days)
     else:
-        forecasts = aggregate_periods(periods, args.days)
-        output = format_markdown_table(forecasts, args.units)
+        forecasts = aggregate_periods(periods, parsed_args.days)
+        output = format_markdown_table(forecasts, parsed_args.units)
 
     print(output)
 
