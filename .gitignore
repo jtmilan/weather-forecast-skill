@@ -4,3 +4,13 @@ __pycache__/
 .venv/
 *.egg-info/
 .cache/
+.worktrees/
+.env
+.env.local
+.env.*.local
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.artifacts/
